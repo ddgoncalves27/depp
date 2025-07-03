@@ -1857,7 +1857,153 @@
                 return false;
             }
         }
+// Add this function to your JavaScript code (around line 3500, after the quickDeploy function)
 
+async function confirmDeploy() {
+    const nameInput = document.getElementById('deployNameInput').value.trim();
+    const projectName = nameInput || generateProjectName();
+    
+    // Validate project name
+    if (!/^[a-z][a-z0-9-]*$/.test(projectName)) {
+        showToast('Project name must start with a letter and contain only lowercase letters, numbers, and hyphens', 'error');
+        return;
+    }
+    
+    // Get selected domain if any
+    const domainSelect = document.getElementById('domainSelect');
+    const customDomain = domainSelect ? domainSelect.value : '';
+    
+    closeModal('deployModal');
+    showToast('Creating your project...', 'success');
+    
+    try {
+        // Get random placeholder template
+        const randomPlaceholder = getRandomPlaceholderTemplate();
+        
+        // Create deployment
+        const deploymentData = {
+            name: projectName,
+            files: [{
+                file: 'index.html',
+                data: randomPlaceholder.html
+            }],
+            target: 'production',
+            public: true
+        };
+        
+        const response = await fetch(`https://api.vercel.com/v13/deployments${getTeamQuery()}`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${state.vercelToken}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(deploymentData)
+        });
+        
+        if (!response.ok) {
+            const errorData = await response.text();
+            console.error('Deployment error:', errorData);
+            
+            let errorMessage = 'Failed to create project';
+            try {
+                const errorJson = JSON.parse(errorData);
+                if (errorJson.error && errorJson.error.message) {
+                    errorMessage = errorJson.error.message;
+                }
+            } catch (e) {
+                // Use generic message
+            }
+            
+            throw new Error(errorMessage);
+        }
+        
+        const deployment = await response.json();
+        console.log('Deployment created:', deployment);
+        
+        // The actual production URL from Vercel (could be different from project name)
+        let productionUrl = `https://${projectName}.vercel.app`;
+        
+        // If deployment has alias or url info, use that
+        if (deployment.url) {
+            productionUrl = deployment.url.startsWith('http') ? deployment.url : `https://${deployment.url}`;
+        } else if (deployment.alias && deployment.alias.length > 0) {
+            const primaryAlias = deployment.alias.find(a => a.endsWith('.vercel.app')) || deployment.alias[0];
+            productionUrl = primaryAlias.startsWith('http') ? primaryAlias : `https://${primaryAlias}`;
+        }
+        
+        // Clean the URL
+        productionUrl = cleanUrl(productionUrl);
+        
+        // Add custom domain if selected
+        let actualUrl = productionUrl;
+        let hasCustomDomain = false;
+        
+        if (customDomain) {
+            try {
+                // Assign custom domain
+                const domainAssignment = {
+                    name: `${projectName}.${customDomain}`,
+                    projectId: deployment.projectId || projectName
+                };
+                
+                const domainResponse = await fetch(`https://api.vercel.com/v10/projects/${projectName}/domains${getTeamQuery()}`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${state.vercelToken}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(domainAssignment)
+                });
+                
+                if (domainResponse.ok) {
+                    actualUrl = `https://${projectName}.${customDomain}`;
+                    hasCustomDomain = true;
+                    console.log('Custom domain assigned:', actualUrl);
+                } else {
+                    console.error('Failed to assign custom domain');
+                }
+            } catch (error) {
+                console.error('Error assigning custom domain:', error);
+            }
+        }
+        
+        // Create project object
+        const newProject = {
+            id: projectName + '_' + Date.now(),
+            name: projectName,
+            url: actualUrl,
+            actualUrl: actualUrl,
+            customDomain: hasCustomDomain,
+            template: randomPlaceholder.category,
+            placeholderType: randomPlaceholder.category,
+            templateName: randomPlaceholder.name,
+            folder: pendingDeployFolder,
+            createdAt: new Date().toISOString()
+        };
+        
+        // Add to projects
+        state.projects.unshift(newProject);
+        
+        // Save data
+        saveCachedData();
+        await saveUserData();
+        
+        showToast(`Project "${projectName}" deployed successfully!`, 'success');
+        
+        // Reload projects view
+        if (state.currentFolder) {
+            loadProjects();
+        } else {
+            showFoldersView();
+        }
+        
+        updateStats();
+        
+    } catch (error) {
+        console.error('Deployment error:', error);
+        showToast(error.message || 'Failed to deploy project', 'error');
+    }
+}
         // Load cached data from localStorage
         function loadCachedData() {
             try {
