@@ -2805,7 +2805,7 @@
         // Example: Project name = "lion", Production URL = "lion-peach.vercel.app"
         // We must get the actual production domain from the deployment response
         
-        async function quickDeploy() {
+        async function () {
             try {
                 // Fetch available custom domains
                 const response = await fetch(`https://api.vercel.com/v5/domains${getTeamQuery()}`, {
@@ -2879,7 +2879,7 @@
                 document.getElementById('deployNameInput').focus();
                 
             } catch (error) {
-                console.error('Error in quickDeploy:', error);
+                console.error('Error in :', error);
                 // Fall back to basic deploy
                 const randomName = generateProjectName();
                 pendingDeployFolder = state.currentFolder === 'Unassigned' ? null : state.currentFolder;
@@ -3195,6 +3195,7 @@
             document.getElementById('offerModal').classList.add('show');
             document.getElementById('offerName').focus();
         }
+
 
         function editOffer(index) {
             state.editingOfferIndex = index;
