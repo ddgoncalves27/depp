@@ -2889,166 +2889,651 @@
                 document.getElementById('deployNameInput').focus();
             }
         }
-        
-        async function confirmDeploy() {
-            const input = document.getElementById('deployNameInput').value.trim();
-            const randomName = generateProjectName();
-            const name = input || randomName;
-            const selectedDomain = document.getElementById('domainSelect')?.value;
+
+        async function updateProject() {
+            if (!state.selectedProject) return;
             
-            // Validate name
-            const validName = name.toLowerCase().replace(/[^a-z0-9-]/g, '');
+            const btn = event.target.closest('button');
+            btn.disabled = true;
+            const originalContent = btn.innerHTML;
+            btn.innerHTML = '<div class="spinner"></div> Deploying...';
             
-            if (!validName) {
-                showToast('Invalid project name', 'error');
+            try {
+                let content = '';
+                let templateType = state.selectedTemplate;
+                let offerName = null;
+                
+                if (state.selectedTemplate === 'offer' && state.selectedOffer !== null) {
+                    content = state.offers[state.selectedOffer].html;
+                    templateType = 'customoffer';
+                    offerName = state.offers[state.selectedOffer].name;
+                }
+                
+                const deploymentData = {
+                    name: state.selectedProject.name,
+                    files: [{ file: 'index.html', data: content }],
+                    target: 'production',
+                    public: true
+                };
+                
+                const response = await fetch(`https://api.vercel.com/v13/deployments${getTeamQuery()}`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${state.vercelToken}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(deploymentData)
+                });
+                
+                if (!response.ok) {
+                    const errorData = await response.text();
+                    console.error('Deployment error:', errorData);
+                    throw new Error('Failed to deploy');
+                }
+                
+                // Don't change the URL - keep the original production URL
+                const projectIndex = state.projects.findIndex(p => p.id === state.selectedProject.id);
+                if (projectIndex >= 0) {
+                    state.projects[projectIndex].template = templateType;
+                    state.projects[projectIndex].offerName = offerName;
+                    // Clear placeholder type if changing to offer or blank
+                    if (templateType === 'blank' || templateType === 'customoffer') {
+                        delete state.projects[projectIndex].placeholderType;
+                    }
+                    // Keep the existing URLs unchanged
+                    saveCachedData();
+                    await saveUserData();
+                }
+                
+                showToast('Project updated successfully!', 'success');
+                loadProjects();
+                
+            } catch (error) {
+                showToast('Failed to update project', 'error');
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = originalContent;
+            }
+        }
+
+        async function deleteProject() {
+            if (!state.selectedProject || !confirm(`Delete ${state.selectedProject.name}?`)) return;
+            
+            const btn = event.target.closest('button');
+            btn.disabled = true;
+            
+            try {
+                const response = await fetch(`https://api.vercel.com/v9/projects/${state.selectedProject.name}${getTeamQuery()}`, {
+                    method: 'DELETE',
+                    headers: { 'Authorization': `Bearer ${state.vercelToken}` }
+                });
+                
+                if (!response.ok) {
+                    console.error('Failed to delete project from Vercel');
+                }
+                
+                const index = state.projects.findIndex(p => p.id === state.selectedProject.id);
+                if (index >= 0) {
+                    state.projects.splice(index, 1);
+                    saveCachedData();
+                    await saveUserData();
+                }
+                
+                showToast('Project deleted', 'success');
+                state.selectedProject = null;
+                document.getElementById('selectedProjectEditor').style.display = 'none';
+                loadProjects();
+                
+            } catch (error) {
+                showToast('Failed to delete project', 'error');
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        async function bulkDeleteFolder() {
+            const folderProjects = state.currentFolder === 'Unassigned'
+                ? state.projects.filter(p => !p.folder)
+                : state.projects.filter(p => p.folder === state.currentFolder);
+            
+            if (folderProjects.length === 0) {
+                showToast('No projects in this folder', 'warning');
                 return;
             }
             
-            closeModal('deployModal');
+            if (!confirm(`Delete all ${folderProjects.length} projects in ${state.currentFolder}?`)) return;
             
-            // Find and update deploy button
-            const deployBtns = document.querySelectorAll('.deploy-btn');
-            let btn = null;
-            deployBtns.forEach(b => {
-                if (b.textContent.includes('Deploy Now')) {
-                    btn = b;
-                }
-            });
+            const btn = event.target.closest('button');
+            btn.disabled = true;
+            const originalContent = btn.innerHTML;
+            btn.innerHTML = '<div class="spinner"></div> Deleting...';
             
-            if (btn) {
-                btn.disabled = true;
-                const originalContent = btn.innerHTML;
-                btn.innerHTML = '<div class="spinner"></div> Deploying...';
-                
+            let deletedCount = 0;
+            
+            for (const project of folderProjects) {
                 try {
-                    // Create project
-                    const createResponse = await fetch(`https://api.vercel.com/v9/projects${getTeamQuery()}`, {
-                        method: 'POST',
-                        headers: {
-                            'Authorization': `Bearer ${state.vercelToken}`,
-                            'Content-Type': 'application/json'
-                        },
-                        body: JSON.stringify({ name: validName })
+                    await fetch(`https://api.vercel.com/v9/projects/${project.name}${getTeamQuery()}`, {
+                        method: 'DELETE',
+                        headers: { 'Authorization': `Bearer ${state.vercelToken}` }
                     });
-                    
-                    let actualProjectName = validName;
-                    let productionUrl = '';
-                    
-                    if (!createResponse.ok) {
-                        const errorText = await createResponse.text();
-                        
-                        if (errorText.includes('already exists')) {
-                            actualProjectName = `${validName}-${Date.now().toString(36)}`;
-                            
-                            const retryResponse = await fetch(`https://api.vercel.com/v9/projects${getTeamQuery()}`, {
-                                method: 'POST',
-                                headers: {
-                                    'Authorization': `Bearer ${state.vercelToken}`,
-                                    'Content-Type': 'application/json'
-                                },
-                                body: JSON.stringify({ name: actualProjectName })
-                            });
-                            
-                            if (!retryResponse.ok) {
-                                throw new Error('Failed to create project');
-                            }
-                            
-                            const retryData = await retryResponse.json();
-                            actualProjectName = retryData.name || actualProjectName;
-                        } else {
-                            throw new Error('Failed to create project');
-                        }
-                    } else {
-                        const projectData = await createResponse.json();
-                        actualProjectName = projectData.name || validName;
-                    }
-                    
-                    // Get random template from templates.js
-                    const template = window.getRandomPlaceholderTemplate();
-                    
-                    // Deploy with random template
-                    const deploymentData = {
-                        name: actualProjectName,
-                        files: [{ 
-                            file: 'index.html', 
-                            data: template.html  // Use template instead of empty string
-                        }],
-                        target: 'production',
-                        public: true
-                    };
-                    
-                    const deployResponse = await fetch(`https://api.vercel.com/v13/deployments${getTeamQuery()}`, {
-                        method: 'POST',
-                        headers: {
-                            'Authorization': `Bearer ${state.vercelToken}`,
-                            'Content-Type': 'application/json'
-                        },
-                        body: JSON.stringify(deploymentData)
-                    });
-                    
-                    if (!deployResponse.ok) {
-                        throw new Error('Failed to deploy');
-                    }
-                    
-                    // Default URL
-                    productionUrl = `https://${actualProjectName}.vercel.app`;
-                    
-                    // Add custom domain if selected
-                    if (selectedDomain) {
-                        const subdomain = `${actualProjectName}.${selectedDomain}`;
-                        
-                        try {
-                            const domainResponse = await fetch(
-                                `https://api.vercel.com/v10/projects/${actualProjectName}/domains${getTeamQuery()}`,
-                                {
-                                    method: 'POST',
-                                    headers: {
-                                        'Authorization': `Bearer ${state.vercelToken}`,
-                                        'Content-Type': 'application/json'
-                                    },
-                                    body: JSON.stringify({ name: subdomain })
-                                }
-                            );
-                            
-                            if (domainResponse.ok) {
-                                productionUrl = `https://${subdomain}`;
-                                await new Promise(r => setTimeout(r, 3000)); // Wait for DNS
-                            } else {
-                                console.error('Failed to add custom domain');
-                            }
-                        } catch (error) {
-                            console.error('Error adding domain:', error);
-                        }
-                    }
-                    
-                    // Wait for deployment
-                    await new Promise(resolve => setTimeout(resolve, 2000));
-                    
-                    // Add to projects with template info
-                    const newProject = {
-                        id: Date.now().toString(),
-                        name: actualProjectName,
-                        url: cleanUrl(productionUrl),
-                        actualUrl: cleanUrl(productionUrl),
-                        customDomain: selectedDomain ? `${actualProjectName}.${selectedDomain}` : null,
-                        template: `${template.category}:${template.name}`,
-                        placeholderType: template.category,
-                        folder: pendingDeployFolder,
-                        createdAt: new Date().toISOString()
-                    };
-                    
-                    state.projects.unshift(newProject);
-                    saveCachedData();
-                    await saveUserData();
-                    
-                    showToast(`Deployed with ${template.name} template! ${cleanUrl(productionUrl)}`, 'success');
-                    loadProjects();
-                    
+                    deletedCount++;
                 } catch (error) {
-                    showToast(error.message || 'Failed to deploy project', 'error');
-                } finally {
-                    btn.disabled = false;
-                    btn.innerHTML = originalContent;
+                    // Continue
                 }
             }
+            
+            if (state.currentFolder === 'Unassigned') {
+                state.projects = state.projects.filter(p => p.folder);
+            } else {
+                state.projects = state.projects.filter(p => p.folder !== state.currentFolder);
+            }
+            
+            saveCachedData();
+            await saveUserData();
+            showToast(`Deleted ${deletedCount} projects`, 'success');
+            loadProjects();
+            
+            btn.disabled = false;
+            btn.innerHTML = originalContent;
         }
+
+        async function refreshFromVercel() {
+            const btn = event.target.closest('button');
+            btn.disabled = true;
+            const originalContent = btn.innerHTML;
+            btn.innerHTML = '<div class="spinner"></div> Syncing...';
+            
+            // Update status indicator
+            const statusIndicator = document.getElementById('statusIndicator');
+            const connectionStatus = document.getElementById('connectionStatus');
+            statusIndicator.style.background = 'var(--warning)';
+            statusIndicator.style.boxShadow = '0 0 20px var(--warning-glow)';
+            connectionStatus.textContent = 'Syncing with Vercel...';
+            
+            try {
+                // Save current state to Vercel
+                await saveUserData();
+                
+                // Wait a moment for deployment
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                
+                // Reload all data from Vercel data project
+                const loaded = await loadUserData();
+                
+                if (!loaded) {
+                    // If couldn't load from Vercel, at least we have cache
+                    showToast('Using cached data', 'warning');
+                } else {
+                    showToast('All data synced successfully', 'success');
+                }
+                
+                // Update cache
+                saveCachedData();
+                
+                // Reload the current view
+                if (state.currentFolder === 'Offers') {
+                    showOffers();
+                } else {
+                    loadProjects();
+                }
+                updateStats();
+                
+            } catch (error) {
+                console.error('Error syncing data:', error);
+                showToast('Sync failed, using cached data', 'error');
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = originalContent;
+                
+                // Restore status indicator
+                statusIndicator.style.background = 'var(--success)';
+                statusIndicator.style.boxShadow = '0 0 20px var(--success-glow)';
+                connectionStatus.textContent = 'Connected to Vercel';
+            }
+        }
+
+        // Offers
+        function showOffers() {
+            const grid = document.getElementById('projectsGrid');
+            
+            if (state.offers.length === 0) {
+                grid.innerHTML = `
+                    <div class="empty-state" style="grid-column: 1 / -1;">
+                        <svg fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+                            <path d="M7 7h10l2 2v10a2 2 0 01-2 2H7a2 2 0 01-2-2V9a2 2 0 012-2zM7 3h10a2 2 0 012 2v2H5V5a2 2 0 012-2z"/>
+                        </svg>
+                        <h3>No Templates Yet</h3>
+                        <p>Create your first offer template to reuse across projects</p>
+                        <button class="btn" onclick="window.createNewOffer()" style="display: inline-flex !important; width: auto !important; margin: 0 auto;">
+                            <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                                <path d="M12 4v16m8-8H4"/>
+                            </svg>
+                            Create Template
+                        </button>
+                    </div>`;
+            } else {
+                grid.innerHTML = `
+                    <div style="grid-column: 1 / -1;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem;">
+                            <h3>Saved Templates</h3>
+                            <button class="btn" onclick="createNewOffer()">
+                                <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                                    <path d="M12 4v16m8-8H4"/>
+                                </svg>
+                                New Template
+                            </button>
+                        </div>
+                        <div class="management-grid">
+                            ${state.offers.map((offer, index) => {
+                                const isAvailable = offer.available !== false;
+                                
+                                return `
+                                <div class="management-card ${!isAvailable ? 'hidden' : ''}">
+                                    <div class="management-card-header">
+                                        <div>
+                                            <div class="management-card-badges">
+                                                <div class="project-status active">Template</div>
+                                                ${!isAvailable ? '<div class="folder-badge" style="background: rgba(239, 68, 68, 0.1); border-color: rgba(239, 68, 68, 0.3); color: var(--danger);">Hidden</div>' : ''}
+                                            </div>
+                                        </div>
+                                        <button class="visibility-toggle ${isAvailable ? 'visible' : 'hidden'}" onclick="event.stopPropagation(); toggleOfferAvailability(${index})" title="${isAvailable ? 'Hide template' : 'Show template'}">
+                                            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                ${isAvailable ? 
+                                                    '<path d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>' :
+                                                    '<path d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21"/>'
+                                                }
+                                            </svg>
+                                        </button>
+                                    </div>
+                                    <div class="management-card-content">
+                                        <div class="management-card-icon">
+                                            <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                                                <path d="M7 7h10l2 2v10a2 2 0 01-2 2H7a2 2 0 01-2-2V9a2 2 0 012-2zM7 3h10a2 2 0 012 2v2H5V5a2 2 0 012-2z"/>
+                                            </svg>
+                                        </div>
+                                        <div class="management-card-name">${offer.name}</div>
+                                        <div class="management-card-count">
+                                            Created ${new Date(offer.createdAt).toLocaleDateString()}
+                                        </div>
+                                    </div>
+                                    <div class="management-card-actions">
+                                        <button class="btn btn-secondary btn-sm" onclick="editOffer(${index})">
+                                            <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                                                <path d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
+                                            </svg>
+                                            Edit
+                                        </button>
+                                        <button class="btn btn-danger btn-sm" onclick="deleteOffer(${index})">
+                                            <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                                                <path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+                                            </svg>
+                                            Delete
+                                        </button>
+                                    </div>
+                                </div>`;
+                            }).join('')}
+                        </div>
+                    </div>`;
+            }
+        }
+
+        async function toggleOfferAvailability(index) {
+            const offer = state.offers[index];
+            offer.available = offer.available === false ? true : false;
+            
+            saveCachedData();
+            await saveUserData();
+            showToast(offer.available ? 'Template is now visible' : 'Template is now hidden', 'success');
+            showOffers();
+        }
+
+        function createNewOffer() {
+            state.editingOfferIndex = null;
+            document.getElementById('offerModalTitle').textContent = 'Create Offer Template';
+            document.getElementById('offerName').value = '';
+            document.getElementById('offerHtml').value = '';
+            document.getElementById('offerModal').classList.add('show');
+            document.getElementById('offerName').focus();
+        }
+
+        function editOffer(index) {
+            state.editingOfferIndex = index;
+            const offer = state.offers[index];
+            document.getElementById('offerModalTitle').textContent = 'Edit Offer Template';
+            document.getElementById('offerName').value = offer.name;
+            document.getElementById('offerHtml').value = offer.html;
+            document.getElementById('offerModal').classList.add('show');
+            document.getElementById('offerName').focus();
+        }
+
+        async function saveOffer() {
+            const name = document.getElementById('offerName').value.trim();
+            const html = document.getElementById('offerHtml').value.trim();
+            
+            if (!name || !html) {
+                showToast('Please fill in all fields', 'error');
+                return;
+            }
+            
+            const offerData = {
+                name,
+                html,
+                type: 'Custom Offer',
+                createdAt: new Date().toISOString(),
+                available: true // New offers are available by default
+            };
+            
+            if (state.editingOfferIndex !== null) {
+                // Preserve existing availability state when editing
+                offerData.available = state.offers[state.editingOfferIndex].available !== false;
+                state.offers[state.editingOfferIndex] = { ...state.offers[state.editingOfferIndex], ...offerData };
+                showToast('Template updated!', 'success');
+            } else {
+                state.offers.push(offerData);
+                showToast('Template created!', 'success');
+            }
+            
+            saveCachedData();
+            await saveUserData();
+            closeModal('offerModal');
+            showOffers();
+        }
+
+        async function deleteOffer(index) {
+            if (confirm(`Delete template "${state.offers[index].name}"?`)) {
+                state.offers.splice(index, 1);
+                saveCachedData();
+                await saveUserData();
+                showToast('Template deleted!', 'success');
+                showOffers();
+            }
+        }
+
+        // Utilities
+        function cleanUrl(url) {
+            if (!url) return '';
+            
+            // Remove any protocol if present
+            let cleaned = url.replace(/^https?:\/\//, '');
+            
+            // Remove any path, query parameters, or fragments
+            cleaned = cleaned.split('/')[0];
+            cleaned = cleaned.split('?')[0];
+            cleaned = cleaned.split('#')[0];
+            
+            // Remove trailing dots or slashes
+            cleaned = cleaned.replace(/[.\/]+$/, '');
+            
+            // Add https:// back if it was removed
+            if (!cleaned.startsWith('http://') && !cleaned.startsWith('https://')) {
+                cleaned = `https://${cleaned}`;
+            }
+            
+            return cleaned;
+        }
+        
+        function generateProjectName() {
+            // Components for creating unique combinations
+            const prefixes = ['x', 'z', 'q', 'j', 'v', 'w', 'y', 'k'];
+            const vowels = ['a', 'e', 'i', 'o', 'u', 'y'];
+            const consonants = ['b', 'c', 'd', 'f', 'g', 'h', 'j', 'k', 'l', 'm', 'n', 'p', 'q', 'r', 's', 't', 'v', 'w', 'x', 'z'];
+            const endings = ['ix', 'ax', 'ox', 'ux', 'ex', 'yx', 'az', 'ez', 'iz', 'oz', 'uz', 'yz'];
+            
+            // Generate a truly unique name using timestamp + random components
+            const timestamp = Date.now().toString(36); // Base36 timestamp
+            const randomPart = Math.random().toString(36).substring(2, 5); // 3 random chars
+            
+            // Create patterns
+            const patterns = [
+                () => {
+                    // Pattern 1: prefix + timestamp + ending
+                    const pre = prefixes[Math.floor(Math.random() * prefixes.length)];
+                    const end = endings[Math.floor(Math.random() * endings.length)];
+                    return `${pre}${timestamp}${end}`;
+                },
+                () => {
+                    // Pattern 2: consonant + vowel + timestamp
+                    const c = consonants[Math.floor(Math.random() * consonants.length)];
+                    const v = vowels[Math.floor(Math.random() * vowels.length)];
+                    return `${c}${v}${timestamp}`;
+                },
+                () => {
+                    // Pattern 3: timestamp + random + ending
+                    const end = endings[Math.floor(Math.random() * endings.length)];
+                    return `${timestamp}${randomPart}${end}`;
+                },
+                () => {
+                    // Pattern 4: random syllable + timestamp
+                    const c1 = consonants[Math.floor(Math.random() * consonants.length)];
+                    const v1 = vowels[Math.floor(Math.random() * vowels.length)];
+                    const c2 = consonants[Math.floor(Math.random() * consonants.length)];
+                    return `${c1}${v1}${c2}${timestamp}`;
+                },
+                () => {
+                    // Pattern 5: unique combo with counter
+                    const uniqueId = `${timestamp}${performance.now().toString(36).replace('.', '')}`;
+                    return uniqueId.substring(0, 12);
+                }
+            ];
+            
+            // Select random pattern
+            const pattern = patterns[Math.floor(Math.random() * patterns.length)];
+            let name = pattern();
+            
+            // Ensure it starts with a letter (Vercel requirement)
+            if (!/^[a-z]/.test(name)) {
+                const letter = consonants[Math.floor(Math.random() * consonants.length)];
+                name = letter + name;
+            }
+            
+            // Clean and trim to reasonable length (3-15 chars)
+            name = name.toLowerCase().replace(/[^a-z0-9]/g, '');
+            if (name.length > 15) {
+                name = name.substring(0, 15);
+            }
+            if (name.length < 3) {
+                name = name + randomPart;
+            }
+            
+            return name;
+        }
+        
+        function getTimeAgo(date) {
+            const seconds = Math.floor((new Date() - date) / 1000);
+            
+            if (seconds < 60) return 'just now';
+            if (seconds < 3600) return `${Math.floor(seconds / 60)} min ago`;
+            if (seconds < 86400) return `${Math.floor(seconds / 3600)} hours ago`;
+            if (seconds < 604800) return `${Math.floor(seconds / 86400)} days ago`;
+            if (seconds < 2592000) return `${Math.floor(seconds / 604800)} weeks ago`;
+            if (seconds < 31536000) return `${Math.floor(seconds / 2592000)} months ago`;
+            return `${Math.floor(seconds / 31536000)} years ago`;
+        }
+
+        function copyUrl(event) {
+            event.stopPropagation();
+            const button = event.currentTarget;
+            const url = button.getAttribute('data-url');
+            
+            navigator.clipboard.writeText(url).then(() => {
+                const originalContent = button.innerHTML;
+                button.innerHTML = '<svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg> Copied';
+                button.style.color = 'var(--success)';
+                
+                setTimeout(() => {
+                    button.innerHTML = originalContent;
+                    button.style.color = '';
+                }, 2000);
+            }).catch(err => {
+                console.error('Failed to copy URL:', err);
+                showToast('Failed to copy URL', 'error');
+            });
+        }
+
+        function showToast(message, type = 'success') {
+            const toast = document.getElementById('toast');
+            const toastMessage = document.getElementById('toastMessage');
+            const toastIcon = document.getElementById('toastIcon');
+            
+            toast.className = `toast show ${type}`;
+            toastMessage.textContent = message;
+            
+            const icons = {
+                success: '<path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>',
+                error: '<path d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z"/>',
+                warning: '<path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>'
+            };
+            
+            toastIcon.innerHTML = icons[type] || icons.success;
+            
+            setTimeout(() => {
+                toast.classList.remove('show');
+            }, 3000);
+        }
+
+        function closeModal(modalId) {
+            document.getElementById(modalId).classList.remove('show');
+            state.pendingAction = null;
+            state.editingFolderIndex = null;
+            state.editingOfferIndex = null;
+        }
+
+        // Event Listeners
+        document.getElementById('folderProtected').addEventListener('change', function(e) {
+            document.getElementById('folderPasswordInput').style.display = e.target.checked ? 'block' : 'none';
+        });
+
+        document.getElementById('passwordInput').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') checkPassword();
+        });
+
+        // Improved auto-submit without delay
+        document.getElementById('passwordInput').addEventListener('input', function(e) {
+            const password = e.target.value;
+            
+            // Check immediately if it matches admin password
+            if (password === state.adminPassword) {
+                checkPassword();
+            } else if (state.pendingAction?.type === 'openFolder') {
+                // For folder passwords, check against the specific folder
+                const folder = state.folders.find(f => f.name === state.pendingAction.folderName);
+                if (folder && password === folder.password) {
+                    checkPassword();
+                }
+            }
+        });
+
+        document.getElementById('folderNameInput').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                if (document.getElementById('folderProtected').checked) {
+                    document.getElementById('folderPasswordInput').focus();
+                } else {
+                    saveFolderSettings();
+                }
+            }
+        });
+
+        document.getElementById('folderPasswordInput').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') saveFolderSettings();
+        });
+
+        document.getElementById('offerName').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                document.getElementById('offerHtml').focus();
+            }
+        });
+
+        document.getElementById('deployNameInput').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') confirmDeploy();
+        });
+
+        document.getElementById('vercelToken').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') saveToken();
+        });
+
+        // Add event listener for the save token button
+        document.getElementById('saveTokenBtn').addEventListener('click', saveToken);
+
+        // Click outside to close modals with proper cleanup
+        document.querySelectorAll('.modal').forEach(modal => {
+            const listener = function(e) {
+                if (e.target === this) closeModal(this.id);
+            };
+            modal.addEventListener('click', listener);
+            modalClickListeners.push({ element: modal, listener });
+        });
+
+        // Save cache before page unload
+        window.addEventListener('beforeunload', () => {
+            saveCachedData();
+        });
+
+        // Cleanup function
+        function cleanup() {
+            // Remove modal listeners
+            modalClickListeners.forEach(({ element, listener }) => {
+                element.removeEventListener('click', listener);
+            });
+            modalClickListeners = [];
+        }
+
+        // Override data project (for recovery in private mode)
+        async function overrideDataProject() {
+            const override = document.getElementById('dataProjectOverride').value.trim();
+            
+            if (!override) {
+                showToast('Please enter a data project name', 'error');
+                return;
+            }
+            
+            // Note: This feature exists for backward compatibility
+            // The app now always uses "deploydatasave" by default
+            showToast('Note: App now uses "deploydatasave" for all users', 'warning');
+            
+            // If they really want to use a different project, allow it
+            state.dataProjectName = override.toLowerCase();
+            state.dataProjectUrl = `https://${override.toLowerCase()}.vercel.app`;
+            localStorage.setItem('userDataProjectName', override.toLowerCase());
+            localStorage.setItem('userDataProjectUrl', state.dataProjectUrl);
+            
+            showToast('Loading data from specified project...', 'success');
+            
+            // Reload the app with the new data project
+            await init();
+        }
+
+        // Make functions globally available
+        window.selectTemplate = selectTemplate;
+        window.selectOffer = selectOffer;
+        window.selectProject = selectProject;
+        window.copyUrl = copyUrl;
+        window.openFolder = openFolder;
+        window.showFoldersView = showFoldersView;
+        window.attemptManageFolders = attemptManageFolders;
+        window.attemptOpenOffers = attemptOpenOffers;
+        window.refreshFromVercel = refreshFromVercel;
+        window.quickDeploy = quickDeploy;
+        window.confirmDeploy = confirmDeploy;
+        window.updateProject = updateProject;
+        window.deleteProject = deleteProject;
+        window.bulkDeleteFolder = bulkDeleteFolder;
+        window.createNewFolder = createNewFolder;
+        window.editFolder = editFolder;
+        window.deleteFolder = deleteFolder;
+        window.saveFolderSettings = saveFolderSettings;
+        window.toggleFolderAvailability = toggleFolderAvailability;
+        window.toggleOfferAvailability = toggleOfferAvailability;
+        window.closeModal = closeModal;
+        window.checkPassword = checkPassword;
+        window.createNewOffer = createNewOffer;
+        window.editOffer = editOffer;
+        window.deleteOffer = deleteOffer;
+        window.saveOffer = saveOffer;
+        window.overrideDataProject = overrideDataProject;
+
+        // Initialize app on page load
+        document.addEventListener('DOMContentLoaded', init);
+    </script>
+</body>
+</html>
